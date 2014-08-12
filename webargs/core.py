@@ -15,19 +15,72 @@ class WebargsError(Exception):
     """Base class for all webargs-related errors."""
     pass
 
+######  Internal errors are because we process the value separate from the
+######  argument, so we don't know what the argument name is and can't
+######  associate the error with an argument until later
+
+class InternalValidationError(WebargsError):
+    """Raised in case an exception was raised during validation."""
+    def __init__(self, underlying_exception):
+        self.e = underlying_exception
+        msg = 'An exception was raised while validating an argument\n%s' % self.e
+        super(InternalValidationError, self).__init__(msg)
+
+class InternalConversionError(WebargsError):
+    """Raised in case an exception was raised during conversion."""
+    def __init__(self, underlying_exception):
+        self.e = underlying_exception
+        msg = 'An exception was raised while converting an argument\n%s' % self.e
+        super(InternalConversionError, self).__init__(msg)
+
+class InternalInvalidArg(WebargsError):
+    """Raised in case an argument is invalid."""
+    def __init__(self):
+        msg = 'An argument did not pass validation'
+        super(InternalInvalidArg, self).__init__(msg)
+
+######  External errors
 
 class ValidationError(WebargsError):
-    """Raised in case of an argument validation error."""
-    def __init__(self, underlying_exception):
-        super(ValidationError, self).__init__(str(underlying_exception))
+    """Raised in case an exception was raised during validation."""
+    def __init__(self, underlying_exception, arg):
+        self.arg = arg
+        self.e = underlying_exception
+        msg = 'An exception was raised while validating %s\n%s' % (arg, self.e)
+        super(ValidationError, self).__init__(msg)
 
+class ConversionError(WebargsError):
+    """Raised in case an exception was raised during conversion."""
+    def __init__(self, underlying_exception, arg):
+        self.arg = arg
+        self.e = underlying_exception
+        msg = 'An exception was raised while converting %s\n%s' % (arg, self.e)
+        super(ConversionError, self).__init__(msg)
+
+class InvalidArg(WebargsError):
+    """Raised in case an argument is invalid."""
+    def __init__(self, arg):
+        self.arg = arg
+        super(InvalidArg, self).__init__("%s did not pass validation." % arg)
+
+class MissingArg(WebargsError):
+    """Raised in case a required argument is missing."""
+    def __init__(self, arg):
+        self.arg = arg
+        super(MissingArg, self).__init__("%s is missing." % arg)
+
+class WebargsValueError(WebargsError):
+    """Raised when an argument to Arg is invalid."""
+    def __init__(self, arg, msg):
+        self.arg = arg
+        super(WebargsValueError, self).__init__(msg)
 
 def _callable(obj):
     """Makes sure an object is callable if it is not ``None``. If not
-    callable, a ValueError is raised.
+    callable, a WebargsValueError is raised.
     """
     if obj and not callable(obj):
-        raise ValueError('{0!r} is not callable.'.format(obj))
+        raise WebargsValueError(obj, '%r is not callable.')
     else:
         return obj
 
@@ -52,41 +105,37 @@ def noop(x):
 class Arg(object):
     """A request argument.
 
+    :param callable convert: Callable (function or object with ``__call__`` method
+        defined) used for conversion. Will attempt to convert the input value
+        with this function. 
     :param default: Default value for the argument. Used if the value is not found
         on the request.
-    :param type type\_: Value type. Will try to convert the passed in value to this
-        type. If ``None``, no type conversion will be performed.
     :param callable validate: Callable (function or object with ``__call__`` method
         defined) used for custom validation. Returns whether or not the
         value is valid.
-    :param callable use: Preprocessing function used for converting or
-        pre-processing the value. Defaults to noop.
-        Example: ``use=lambda s: s.lower()``
-    :param bool multiple: Return a list of values for the argument. Useful for
-        querystrings or forms that pass multiple values to the same parameter,
-        e.g. ``/?name=foo&name=bar``
-    :param str error: Custom error message to use if validation fails.
+    :param container multiple: Container type (list or set or None). Return
+        a container of values for the argument. Useful for querystrings or forms
+        that pass multiple values to the same parameter, e.g.
+        ``/?name=foo&name=bar``. Defaults to None (with multiple values,
+        argument will take last value)
     :param bool allow_missing: If the argument's value is ``None``, don't
         include it in the returned arguments dictionary.
-
-    .. versionchanged:: 0.5.0
-        The ``use`` callable is called before type conversion.
     """
-    def __init__(self, type_=None, default=None, required=False,
-                 validate=None, use=None, multiple=False, error=None,
-                 allow_missing=False, target=None):
-        self.type = type_ or noop  # default to no type conversion
+    def __init__(self, convert=None, default=None, required=False,
+                 validate=None, multiple=None, allow_missing=False, target=None):
+        self.convert = _callable(convert) or noop  # default to no type conversion
+        self.validate = _callable(validate) or (lambda x: True)
+        if multiple not in (list, set, None):
+            raise WebargsValueError(multiple, '%r is not a list, set or None.')
+        self.multiple = multiple
         if multiple and default is None:
-            self.default = []
+            self.default = multiple()
         else:
             self.default = default
         self.required = required
-        self.validate = _callable(validate) or (lambda x: True)
-        self.use = _callable(use) or noop
-        self.error = error
-        self.multiple = multiple
         if required and allow_missing:
-            raise ValueError('"required" and "allow_missing" cannot both be True.')
+            raise WebargsValueError(None,
+                    '"required" and "allow_missing" cannot both be True.')
         self.allow_missing = allow_missing
         self.target = target
 
@@ -95,26 +144,26 @@ class Arg(object):
         ret = value
         # First convert the value
         try:
-            ret = self.type(self.use(value))
-        except ValueError as error:
-            raise ValidationError(self.error or error)
+            ret = self.convert(value)
+        except Exception as e:
+            raise InternalConversionError(e)
         # Then call validation function
-        if not self.validate(ret):
-            msg = 'Validator {0}({1}) is not True'.format(
-                self.validate.__name__, ret
-            )
-            raise ValidationError(self.error or msg)
+        try:
+            validated = self.validate(ret)
+        except Exception as e:
+            raise InternalValidationError(e)
+        if not validated:
+            raise InternalInvalidArg()
         return ret
 
     def validated(self, value):
-        """Convert and validate the given value according to the ``type_``,
-        ``use``, and ``validate`` attributes.
+        """Convert and validate the given value according to the ``convert``
+        and ``validate`` attributes.
 
         :returns: The validated, converted value
-        :raises: ValidationError if validation fails
         """
         if self.multiple and isinstance(value, list):
-            return [self._validate(each) for each in value]
+            return self.multiple([self._validate(each) for each in value])
         else:
             return self._validate(value)
 
@@ -157,7 +206,7 @@ class Parser(object):
         invalid_targets = given - valid_targets
         if len(invalid_targets):
             msg = "Invalid targets arguments: {0}".format(list(invalid_targets))
-            raise ValueError(msg)
+            raise WebargsValueError(msg)
         return targets
 
     def _get_value(self, name, argobj, req, target):
@@ -188,22 +237,37 @@ class Parser(object):
         if argobj.target:
             value = self._get_value(name, argobj, req=req, target=argobj.target)
             if value is not None:
-                return argobj.validated(value)
-
+                try:
+                    ret = argobj.validated(value)
+                except InternalConversionError as e:
+                    raise ConversionError(e.e, name)
+                except InternalValidationError as e:
+                    raise ValidationError(e.e, name)
+                except InternalInvalidArg as e:
+                    raise InvalidArg(name)
+                return ret
         for target in self._validated_targets(targets or self.targets):
             value = self._get_value(name, argobj, req=req, target=target)
             if argobj.multiple and not (isinstance(value, list) and len(value)):
                 continue
             # Found the value; validate and return it
             if value is not None:
-                return argobj.validated(value)
+                try:
+                    ret = argobj.validated(value)
+                except InternalConversionError as e:
+                    raise ConversionError(e.e, name)
+                except InternalValidationError as e:
+                    raise ValidationError(e.e, name)
+                except InternalInvalidArg as e:
+                    raise InvalidArg(name)
+                return ret
         if value is None:
             if argobj.default is not None:
                 value = argobj.default
             else:
                 value = self.fallback(req, name, argobj)
             if not value and argobj.required:
-                raise ValidationError('Required parameter {0!r} not found.'.format(name))
+                raise MissingArg(name)
         return value
 
     def parse(self, argmap, req, targets=None):
