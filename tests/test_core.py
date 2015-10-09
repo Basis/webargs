@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import mock
+from six.moves import mock
 
 import pytest
 

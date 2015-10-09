@@ -7,7 +7,7 @@ try:
 except ImportError:
     from urllib.parse import urlencode  # python3
 
-import mock
+from six.moves import mock
 import pytest
 
 import tornado.web

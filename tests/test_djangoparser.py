@@ -2,7 +2,7 @@
 from __future__ import unicode_literals
 
 import pytest
-import mock
+from six.moves import mock
 from webtest import TestApp
 from tests.testapp.testapp.wsgi import application
 from webargs import Arg

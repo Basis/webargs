@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 import json
-import mock
+from six.moves import mock
 import io
 
 from flask import Flask, jsonify
